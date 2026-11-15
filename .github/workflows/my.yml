@@ -3,6 +3,12 @@ name: Build Kernel
 on:
   workflow_dispatch:
     inputs:
+      repo:
+        description: "Repo kernel (user/repo)"
+        default: "DooPrjkt/android_kernel_common"
+      branch:
+        description: "Branch"
+        default: "android12-5.10-lts"
       defconfig:
         description: "Defconfig"
         default: "gki_defconfig"
@@ -11,10 +17,6 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
       - name: Install deps
         run: |
           sudo apt-get update
@@ -22,7 +24,13 @@ jobs:
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             bc bison flex libssl-dev libelf-dev lz4 cpio python3
 
+      - name: Clone kernel
+        run: |
+          git clone --depth=1 -b ${{ inputs.branch }} \
+            https://github.com/${{ inputs.repo }}.git kernel
+
       - name: Build
+        working-directory: kernel
         run: |
           export PATH=/usr/lib/llvm-18/bin:$PATH
           export ARGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
@@ -30,8 +38,8 @@ jobs:
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
             KCFLAGS=-Wno-error"
           make $ARGS ${{ inputs.defconfig }}
-          make $ARGS -j$(nproc) Image Image.gz Image.lz4 2>&1 | tee build.log
-          make kernelversion
+          make $ARGS -j$(nproc) Image Image.gz Image.lz4 2>&1 | tee ../build.log
+          make $ARGS kernelversion
 
       - name: Upload
         if: always()
@@ -39,7 +47,7 @@ jobs:
         with:
           name: kernel-${{ github.run_number }}
           path: |
-            out/arch/arm64/boot/Image
-            out/arch/arm64/boot/Image.gz
-            out/arch/arm64/boot/Image.lz4
+            kernel/out/arch/arm64/boot/Image
+            kernel/out/arch/arm64/boot/Image.gz
+            kernel/out/arch/arm64/boot/Image.lz4
             build.log
