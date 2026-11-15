@@ -1,4 +1,4 @@
-name: Build Kernel v2
+name: Build Kernel
 
 on:
   workflow_dispatch:
@@ -8,14 +8,14 @@ on:
         default: "DooPrjkt/android_kernel_common"
       branch:
         description: "Branch"
-        default: "android12.5.10"
+        default: "android12.5.10-lts"
       defconfig:
         description: "Defconfig"
         default: "gki_defconfig"
       clang:
         description: "Versi clang"
         type: choice
-        default: "14"
+        default: "12"
         options:
           - "12"
           - "13"
@@ -25,6 +25,15 @@ on:
           - "17"
           - "18"
           - "19"
+      lto:
+        description: "Mode LTO"
+        type: choice
+        default: "thin"
+        options:
+          - "thin"
+          - "full"
+          - "none"
+          - "default"
 
 env:
   TG_TOKEN: ${{ secrets.TG_TOKEN }}
@@ -47,7 +56,17 @@ jobs:
           Repo: ${{ inputs.repo }}
           Branch: ${{ inputs.branch }}
           Defconfig: ${{ inputs.defconfig }}
-          Clang: ${{ inputs.clang }}"
+          Clang: ${{ inputs.clang }}
+          LTO: ${{ inputs.lto }}"
+
+      - name: Tambah swap
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 10G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
 
       - name: Install deps
         run: |
@@ -84,7 +103,24 @@ jobs:
             KCFLAGS=-Wno-error"
 
           make $ARGS ${{ inputs.defconfig }}
-          $HOME/tg.sh "⚙️ Defconfig selesai, mulai compile..."
+
+          # atur mode LTO
+          case "${{ inputs.lto }}" in
+            thin)
+              ./scripts/config --file out/.config -d LTO_CLANG_FULL -e LTO_CLANG_THIN
+              make $ARGS olddefconfig ;;
+            full)
+              ./scripts/config --file out/.config -d LTO_CLANG_THIN -e LTO_CLANG_FULL
+              make $ARGS olddefconfig ;;
+            none)
+              ./scripts/config --file out/.config \
+                -d LTO_CLANG_FULL -d LTO_CLANG_THIN -d LTO_CLANG -d CFI_CLANG -e LTO_NONE
+              make $ARGS olddefconfig ;;
+            *) echo "LTO: ikut defconfig" ;;
+          esac
+          grep -E "CONFIG_LTO|CONFIG_CFI" out/.config
+
+          $HOME/tg.sh "⚙️ Config selesai (LTO: ${{ inputs.lto }}), mulai compile..."
 
           # notif periodik tiap 5 menit
           ( while true; do
@@ -133,6 +169,7 @@ jobs:
           Versi: $KVER
           Branch: ${{ inputs.branch }}
           Clang: ${{ inputs.clang }}
+          LTO: ${{ inputs.lto }}
           Durasi: $DUR menit" \
             https://api.telegram.org/bot$TG_TOKEN/sendDocument
 
