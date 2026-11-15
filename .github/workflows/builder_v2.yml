@@ -1,0 +1,113 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Repo kernel (user/repo)"
+        default: "DooPrjkt/android_kernel_common"
+      branch:
+        description: "Branch"
+        default: "android12-5.10-lts"
+      defconfig:
+        description: "Defconfig"
+        default: "gki_defconfig"
+
+env:
+  TG_TOKEN: ${{ secrets.TG_TOKEN }}
+  TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Setup helper Telegram
+        run: |
+          cat > $HOME/tg.sh <<'EOF'
+          #!/bin/bash
+          curl -s -X POST "https://api.telegram.org/bot$TG_TOKEN/sendMessage" \
+            -d chat_id="$TG_CHAT_ID" -d parse_mode=HTML \
+            --data-urlencode text="$1" > /dev/null
+          EOF
+          chmod +x $HOME/tg.sh
+          $HOME/tg.sh "🚀 <b>Build kernel #${{ github.run_number }} mulai</b>
+          Repo: ${{ inputs.repo }}
+          Branch: ${{ inputs.branch }}
+          Defconfig: ${{ inputs.defconfig }}"
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 llvm-18 \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            bc bison flex libssl-dev libelf-dev lz4 cpio python3
+          $HOME/tg.sh "📦 Dependency selesai di-install"
+
+      - name: Clone kernel
+        run: |
+          git clone --depth=1 -b ${{ inputs.branch }} \
+            https://github.com/${{ inputs.repo }}.git kernel
+          $HOME/tg.sh "📥 Clone repo selesai"
+
+      - name: Build
+        working-directory: kernel
+        run: |
+          export PATH=/usr/lib/llvm-18/bin:$PATH
+          export ARGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            KCFLAGS=-Wno-error"
+
+          make $ARGS ${{ inputs.defconfig }}
+          $HOME/tg.sh "⚙️ Defconfig selesai, mulai compile..."
+
+          # notif periodik tiap 5 menit
+          ( while true; do
+              sleep 300
+              N=$(find out -name '*.o' 2>/dev/null | wc -l)
+              $HOME/tg.sh "🔨 Masih building... ($N object file selesai)"
+            done ) &
+          TICKER=$!
+
+          START=$(date +%s)
+          make $ARGS -j$(nproc) Image Image.gz Image.lz4 2>&1 | tee ../build.log
+          RC=${PIPESTATUS[0]}
+          kill $TICKER 2>/dev/null
+
+          END=$(date +%s)
+          echo "DUR=$(( (END-START)/60 ))" >> $GITHUB_ENV
+          echo "KVER=$(make $ARGS -s kernelversion)" >> $GITHUB_ENV
+          exit $RC
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ github.run_number }}
+          path: |
+            kernel/out/arch/arm64/boot/Image
+            kernel/out/arch/arm64/boot/Image.gz
+            kernel/out/arch/arm64/boot/Image.lz4
+            build.log
+
+      - name: Send results
+        if: success()
+        run: |
+          curl -s -F chat_id=$TG_CHAT_ID \
+            -F document=@kernel/out/arch/arm64/boot/Image.gz \
+            -F parse_mode=HTML \
+            -F caption="✅ <b>Build #${{ github.run_number }} sukses</b>
+          Versi: $KVER
+          Branch: ${{ inputs.branch }}
+          Durasi: $DUR menit" \
+            https://api.telegram.org/bot$TG_TOKEN/sendDocument
+
+      - name: Send log failed
+        if: failure()
+        run: |
+          tail -n 40 build.log > err.txt 2>/dev/null || echo "log kosong" > err.txt
+          curl -s -F chat_id=$TG_CHAT_ID \
+            -F document=@build.log \
+            -F caption="❌ Build #${{ github.run_number }} GAGAL
+          Link: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            https://api.telegram.org/bot$TG_TOKEN/sendDocument
