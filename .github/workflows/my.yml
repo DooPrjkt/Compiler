@@ -1,0 +1,45 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: "Defconfig"
+        default: "gki_defconfig"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 llvm-18 \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            bc bison flex libssl-dev libelf-dev lz4 cpio python3
+
+      - name: Build
+        run: |
+          export PATH=/usr/lib/llvm-18/bin:$PATH
+          export ARGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            KCFLAGS=-Wno-error"
+          make $ARGS ${{ inputs.defconfig }}
+          make $ARGS -j$(nproc) Image Image.gz Image.lz4 2>&1 | tee build.log
+          make kernelversion
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ github.run_number }}
+          path: |
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/Image.lz4
+            build.log
