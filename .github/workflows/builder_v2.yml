@@ -1,4 +1,4 @@
-name: Build Kernel
+name: Build Kernel v2
 
 on:
   workflow_dispatch:
@@ -8,10 +8,23 @@ on:
         default: "DooPrjkt/android_kernel_common"
       branch:
         description: "Branch"
-        default: "android12-5.10-lts"
+        default: "android12.5.10"
       defconfig:
         description: "Defconfig"
         default: "gki_defconfig"
+      clang:
+        description: "Versi clang"
+        type: choice
+        default: "14"
+        options:
+          - "12"
+          - "13"
+          - "14"
+          - "15"
+          - "16"
+          - "17"
+          - "18"
+          - "19"
 
 env:
   TG_TOKEN: ${{ secrets.TG_TOKEN }}
@@ -19,9 +32,9 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     steps:
-      - name: Setup helper Telegram
+      - name: Siapin helper Telegram
         run: |
           cat > $HOME/tg.sh <<'EOF'
           #!/bin/bash
@@ -33,15 +46,27 @@ jobs:
           $HOME/tg.sh "🚀 <b>Build kernel #${{ github.run_number }} mulai</b>
           Repo: ${{ inputs.repo }}
           Branch: ${{ inputs.branch }}
-          Defconfig: ${{ inputs.defconfig }}"
+          Defconfig: ${{ inputs.defconfig }}
+          Clang: ${{ inputs.clang }}"
 
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 lld-18 llvm-18 \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            bc bison flex libssl-dev libelf-dev lz4 cpio python3
-          $HOME/tg.sh "📦 Dependency selesai di-install"
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            bc bison flex libssl-dev libelf-dev lz4 cpio python3 wget lsb-release \
+            software-properties-common gnupg zip
+
+          V=${{ inputs.clang }}
+          if [ "$V" -le 15 ]; then
+            sudo apt-get install -y clang-$V lld-$V llvm-$V
+          else
+            wget -q https://apt.llvm.org/llvm.sh
+            chmod +x llvm.sh
+            sudo ./llvm.sh $V
+            sudo apt-get install -y lld-$V llvm-$V
+          fi
+          /usr/lib/llvm-$V/bin/clang --version | head -1
+          $HOME/tg.sh "📦 Dependency selesai (clang $V)"
 
       - name: Clone kernel
         run: |
@@ -52,7 +77,7 @@ jobs:
       - name: Build
         working-directory: kernel
         run: |
-          export PATH=/usr/lib/llvm-18/bin:$PATH
+          export PATH=/usr/lib/llvm-${{ inputs.clang }}/bin:$PATH
           export ARGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
@@ -70,7 +95,7 @@ jobs:
           TICKER=$!
 
           START=$(date +%s)
-          make $ARGS -j$(nproc) Image Image.gz Image.lz4 2>&1 | tee ../build.log
+          make $ARGS -j$(nproc) Image.gz 2>&1 | tee ../build.log
           RC=${PIPESTATUS[0]}
           kill $TICKER 2>/dev/null
 
@@ -79,35 +104,49 @@ jobs:
           echo "KVER=$(make $ARGS -s kernelversion)" >> $GITHUB_ENV
           exit $RC
 
+      - name: Bungkus AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/DooPrjkt/AnyKernel3_2.git ak3
+          cp kernel/out/arch/arm64/boot/Image.gz ak3/Image.gz
+          cd ak3
+          ZIPNAME="Kernel-${KVER}-$(date +%Y%m%d-%H%M).zip"
+          zip -r9 ../$ZIPNAME . -x ".git*" "README.md" "*placeholder"
+          echo "ZIPNAME=$ZIPNAME" >> $GITHUB_ENV
+          $HOME/tg.sh "📦 Zip AnyKernel3 selesai: $ZIPNAME"
+
       - name: Upload artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kernel-${{ github.run_number }}
           path: |
-            kernel/out/arch/arm64/boot/Image
-            kernel/out/arch/arm64/boot/Image.gz
-            kernel/out/arch/arm64/boot/Image.lz4
+            *.zip
             build.log
 
-      - name: Send results
+      - name: Kirim hasil ke Telegram
         if: success()
         run: |
           curl -s -F chat_id=$TG_CHAT_ID \
-            -F document=@kernel/out/arch/arm64/boot/Image.gz \
+            -F document=@$ZIPNAME \
             -F parse_mode=HTML \
             -F caption="✅ <b>Build #${{ github.run_number }} sukses</b>
           Versi: $KVER
           Branch: ${{ inputs.branch }}
+          Clang: ${{ inputs.clang }}
           Durasi: $DUR menit" \
             https://api.telegram.org/bot$TG_TOKEN/sendDocument
 
-      - name: Send log failed
+      - name: Kirim log kalau gagal
         if: failure()
         run: |
-          tail -n 40 build.log > err.txt 2>/dev/null || echo "log kosong" > err.txt
-          curl -s -F chat_id=$TG_CHAT_ID \
-            -F document=@build.log \
-            -F caption="❌ Build #${{ github.run_number }} GAGAL
-          Link: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            https://api.telegram.org/bot$TG_TOKEN/sendDocument
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ -f build.log ]; then
+            curl -s -F chat_id=$TG_CHAT_ID \
+              -F document=@build.log \
+              -F caption="❌ Build #${{ github.run_number }} GAGAL
+          $RUN_URL" \
+              https://api.telegram.org/bot$TG_TOKEN/sendDocument
+          else
+            $HOME/tg.sh "❌ Build #${{ github.run_number }} GAGAL sebelum compile
+          $RUN_URL"
+          fi
