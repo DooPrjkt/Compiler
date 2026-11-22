@@ -9,8 +9,8 @@ on:
         default: twrp
         options: [twrp, ofox, pbrp, shrp]
       manifest_branch:
-        description: "Branch manifest (twrp: twrp-12.1 | ofox: 12.1 | pbrp: android-12.1 | shrp: v3_12.1)"
-        default: "twrp-12.1"
+        description: "Branch manifest (kosong = otomatis. ofox: 12.1/14.1/16.0 | twrp: twrp-12.1 | pbrp: android-12.1 | shrp: v3_12.1)"
+        default: ""
       device_repo:
         description: "URL device tree"
         default: "https://github.com/mibomboq/recovery-device_advan_ADVAN_X1"
@@ -29,7 +29,7 @@ on:
         default: eng
         options: [eng, userdebug]
       target:
-        description: "Target make (kosongkan = otomatis sesuai recovery)"
+        description: "Target make (kosong = otomatis sesuai recovery)"
         default: ""
       extra_cmd:
         description: "Command tambahan sebelum build (opsional)"
@@ -73,6 +73,25 @@ jobs:
           git config --global user.name "mibomboq"
           git config --global user.email "mibomboq@users.noreply.github.com"
 
+      - name: Resolve manifest branch
+        run: |
+          if [ -z "$MANIFEST_BRANCH" ]; then
+            case "$RECOVERY" in
+              twrp) MANIFEST_BRANCH="twrp-12.1" ;;
+              ofox) MANIFEST_BRANCH="12.1" ;;
+              pbrp) MANIFEST_BRANCH="android-12.1" ;;
+              shrp) MANIFEST_BRANCH="v3_12.1" ;;
+            esac
+          fi
+          if [ "$RECOVERY" = "ofox" ]; then
+            case "$MANIFEST_BRANCH" in
+              12.1|14.1|16.0) ;;
+              *) echo "Branch OFOX harus 12.1 / 14.1 / 16.0, bukan '$MANIFEST_BRANCH'"; exit 1 ;;
+            esac
+          fi
+          echo "MANIFEST_BRANCH=$MANIFEST_BRANCH" >> $GITHUB_ENV
+          echo "Pakai branch: $MANIFEST_BRANCH"
+
       - name: Sync source
         run: |
           set -eo pipefail
@@ -114,9 +133,7 @@ jobs:
         run: |
           cd $WORKDIR/$DEVICE_PATH
           if [ -f vendorsetup.sh ]; then
-            # file Magisk tidak ada di runner
             sed -i '/FOX_USE_SPECIFIC_MAGISK_ZIP/d' vendorsetup.sh
-            # clone gflags hanya kalau belum ada
             sed -i 's|^git clone https://android.googlesource.com/platform/external/gflags/ -b android-12.1.0_r4 external/gflags|[ -d external/gflags ] \|\| git clone https://android.googlesource.com/platform/external/gflags/ -b android-12.1.0_r4 external/gflags|' vendorsetup.sh
           fi
 
@@ -143,7 +160,6 @@ jobs:
             eval "$EXTRA_CMD"
           fi
 
-          # envsetup/lunch return non-zero di beberapa titik, jadi jangan pakai -e di sini
           set +e
           source build/envsetup.sh
           lunch twrp_${CODENAME}-${VARIANT} || exit 1
