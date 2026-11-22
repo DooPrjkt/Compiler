@@ -1,11 +1,55 @@
-name: Build TWRP
+name: Build Recovery
 
 on:
   workflow_dispatch:
+    inputs:
+      recovery:
+        description: "Jenis recovery"
+        type: choice
+        default: twrp
+        options: [twrp, ofox, pbrp, shrp]
+      manifest_branch:
+        description: "Branch manifest (twrp: twrp-12.1 | ofox: 12.1 | pbrp: android-12.1 | shrp: v3_12.1)"
+        default: "twrp-12.1"
+      device_repo:
+        description: "URL device tree"
+        default: "https://github.com/mibomboq/recovery-device_advan_ADVAN_X1"
+      device_branch:
+        description: "Branch device tree"
+        default: "twrp-12.1"
+      device_path:
+        description: "Path device tree di source"
+        default: "device/advan/ADVAN_X1"
+      device_codename:
+        description: "Codename (dipakai di lunch & folder out)"
+        default: "ADVAN_X1"
+      variant:
+        description: "Build variant"
+        type: choice
+        default: eng
+        options: [eng, userdebug]
+      target:
+        description: "Target make (kosongkan = otomatis sesuai recovery)"
+        default: ""
+      extra_cmd:
+        description: "Command tambahan sebelum build (opsional)"
+        default: ""
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    env:
+      RECOVERY: ${{ inputs.recovery }}
+      MANIFEST_BRANCH: ${{ inputs.manifest_branch }}
+      DEVICE_REPO: ${{ inputs.device_repo }}
+      DEVICE_BRANCH: ${{ inputs.device_branch }}
+      DEVICE_PATH: ${{ inputs.device_path }}
+      CODENAME: ${{ inputs.device_codename }}
+      VARIANT: ${{ inputs.variant }}
+      TARGET: ${{ inputs.target }}
+      EXTRA_CMD: ${{ inputs.extra_cmd }}
+      WORKDIR: /home/runner/rec
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
@@ -23,31 +67,65 @@ jobs:
           sudo apt-get install -y git-core gnupg flex bison build-essential zip curl \
             zlib1g-dev libc6-dev-i386 libncurses5 x11proto-core-dev libx11-dev \
             libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig python3 \
-            bc rsync lz4 cpio libssl-dev repo
-
-      - name: Sync minimal manifest
-        run: |
-          mkdir -p ~/twrp && cd ~/twrp
+            bc rsync lz4 cpio libssl-dev ccache
+          sudo curl -s https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          sudo chmod a+rx /usr/local/bin/repo
           git config --global user.name "mibomboq"
           git config --global user.email "mibomboq@users.noreply.github.com"
-          repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b twrp-12.1
-          repo sync -c -j$(nproc) --force-sync --no-clone-bundle --no-tags
+
+      - name: Sync source
+        run: |
+          mkdir -p $WORKDIR && cd $WORKDIR
+          case "$RECOVERY" in
+            twrp)
+              repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b "$MANIFEST_BRANCH"
+              ;;
+            pbrp)
+              repo init --depth=1 -u https://github.com/PitchBlackRecoveryProject/manifest_pb.git -b "$MANIFEST_BRANCH"
+              ;;
+            shrp)
+              repo init --depth=1 -u https://github.com/SHRP/platform_manifest_twrp_aosp.git -b "$MANIFEST_BRANCH"
+              ;;
+            ofox)
+              git clone --depth=1 https://gitlab.com/OrangeFox/sync.git ~/fox_sync
+              cd ~/fox_sync && ./orangefox_sync.sh --branch "$MANIFEST_BRANCH" --path $WORKDIR
+              ;;
+          esac
+          if [ "$RECOVERY" != "ofox" ]; then
+            repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+          fi
 
       - name: Clone device tree
         run: |
-          cd ~/twrp
-          git clone https://github.com/mibomboq/android_device_advan_X1 -b <branch> device/advan/X1
+          cd $WORKDIR
+          rm -rf "$DEVICE_PATH"
+          git clone --depth=1 "$DEVICE_REPO" -b "$DEVICE_BRANCH" "$DEVICE_PATH"
 
       - name: Build
         run: |
-          cd ~/twrp
-          source build/envsetup.sh
+          cd $WORKDIR
           export ALLOW_MISSING_DEPENDENCIES=true
-          lunch twrp_X1-eng
-          mka vendorbootimage -j$(nproc)   # ganti ke bootimage / recoveryimage sesuai setup
+          export LC_ALL=C
+          [ "$RECOVERY" = "ofox" ] && export FOX_BUILD_DEVICE="$CODENAME"
+
+          if [ -z "$TARGET" ]; then
+            case "$RECOVERY" in
+              twrp|pbrp)  TARGET="vendorbootimage" ;;
+              ofox|shrp)  TARGET="adbd vendorbootimage" ;;
+            esac
+          fi
+
+          [ -n "$EXTRA_CMD" ] && eval "$EXTRA_CMD"
+
+          source build/envsetup.sh
+          lunch twrp_${CODENAME}-${VARIANT}
+          mka $TARGET -j$(nproc --all)
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: twrp-X1
-          path: ~/twrp/out/target/product/X1/*.img
+          name: ${{ inputs.recovery }}-${{ inputs.device_codename }}
+          path: |
+            /home/runner/rec/out/target/product/${{ inputs.device_codename }}/*.img
+            /home/runner/rec/out/target/product/${{ inputs.device_codename }}/*.zip
+          if-no-files-found: warn
