@@ -38,7 +38,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 300
+    timeout-minutes: 340
     env:
       RECOVERY: ${{ inputs.recovery }}
       MANIFEST_BRANCH: ${{ inputs.manifest_branch }}
@@ -75,51 +75,79 @@ jobs:
 
       - name: Sync source
         run: |
+          set -eo pipefail
           mkdir -p $WORKDIR && cd $WORKDIR
           case "$RECOVERY" in
             twrp)
               repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b "$MANIFEST_BRANCH"
+              repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
               ;;
             pbrp)
               repo init --depth=1 -u https://github.com/PitchBlackRecoveryProject/manifest_pb.git -b "$MANIFEST_BRANCH"
+              repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
               ;;
             shrp)
               repo init --depth=1 -u https://github.com/SHRP/platform_manifest_twrp_aosp.git -b "$MANIFEST_BRANCH"
+              repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
               ;;
             ofox)
-              git clone --depth=1 https://gitlab.com/OrangeFox/sync.git ~/fox_sync
-              cd ~/fox_sync && ./orangefox_sync.sh --branch "$MANIFEST_BRANCH" --path $WORKDIR
+              git clone --depth=1 https://gitlab.com/OrangeFox/sync.git /home/runner/fox_sync
+              cd /home/runner/fox_sync
+              bash ./orangefox_sync.sh --branch "$MANIFEST_BRANCH" --path "$WORKDIR"
+              ;;
+            *)
+              echo "Recovery tidak dikenal: $RECOVERY"; exit 1
               ;;
           esac
-          if [ "$RECOVERY" != "ofox" ]; then
-            repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
-          fi
+          cd $WORKDIR
+          test -f build/envsetup.sh || { echo "SYNC GAGAL, envsetup.sh tidak ada"; ls -la; exit 1; }
 
       - name: Clone device tree
         run: |
+          set -eo pipefail
           cd $WORKDIR
           rm -rf "$DEVICE_PATH"
           git clone --depth=1 "$DEVICE_REPO" -b "$DEVICE_BRANCH" "$DEVICE_PATH"
 
+      - name: Patch vendorsetup (OFOX)
+        if: ${{ inputs.recovery == 'ofox' }}
+        run: |
+          cd $WORKDIR/$DEVICE_PATH
+          if [ -f vendorsetup.sh ]; then
+            # file Magisk tidak ada di runner
+            sed -i '/FOX_USE_SPECIFIC_MAGISK_ZIP/d' vendorsetup.sh
+            # clone gflags hanya kalau belum ada
+            sed -i 's|^git clone https://android.googlesource.com/platform/external/gflags/ -b android-12.1.0_r4 external/gflags|[ -d external/gflags ] \|\| git clone https://android.googlesource.com/platform/external/gflags/ -b android-12.1.0_r4 external/gflags|' vendorsetup.sh
+          fi
+
       - name: Build
         run: |
+          set -o pipefail
           cd $WORKDIR
           export ALLOW_MISSING_DEPENDENCIES=true
           export LC_ALL=C
-          [ "$RECOVERY" = "ofox" ] && export FOX_BUILD_DEVICE="$CODENAME"
+          export USE_CCACHE=1
+          export CCACHE_EXEC=/usr/bin/ccache
+          if [ "$RECOVERY" = "ofox" ]; then
+            export FOX_BUILD_DEVICE="$CODENAME"
+          fi
 
           if [ -z "$TARGET" ]; then
             case "$RECOVERY" in
-              twrp|pbrp)  TARGET="vendorbootimage" ;;
-              ofox|shrp)  TARGET="adbd vendorbootimage" ;;
+              twrp|pbrp) TARGET="vendorbootimage" ;;
+              ofox|shrp) TARGET="adbd vendorbootimage" ;;
             esac
           fi
 
-          [ -n "$EXTRA_CMD" ] && eval "$EXTRA_CMD"
+          if [ -n "$EXTRA_CMD" ]; then
+            eval "$EXTRA_CMD"
+          fi
 
+          # envsetup/lunch return non-zero di beberapa titik, jadi jangan pakai -e di sini
+          set +e
           source build/envsetup.sh
-          lunch twrp_${CODENAME}-${VARIANT}
-          mka $TARGET -j$(nproc --all)
+          lunch twrp_${CODENAME}-${VARIANT} || exit 1
+          mka $TARGET -j$(nproc --all) || exit 1
 
       - name: Upload
         uses: actions/upload-artifact@v4
